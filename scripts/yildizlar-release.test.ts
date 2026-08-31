@@ -122,6 +122,54 @@ describe("Yildizlar-owned OMP release", () => {
 			await fs.rm(fixture.root, { recursive: true, force: true });
 		}
 	});
+	test("upgrades a matching legacy receipt for an already installed bundle", async () => {
+		const fixture = await tempInstall();
+		try {
+			const installedManifest = {
+				...manifest,
+				bundleSha256: crypto.createHash("sha256").update("new bundle").digest("hex"),
+			};
+			const backupPath = path.join(
+				fixture.home,
+				".omp",
+				"agent",
+				"backups",
+				"yildizlar-omp-runtime",
+				manifest.sourceCommit,
+				"cli.js",
+			);
+			await Bun.write(fixture.installedPath, "new bundle");
+			await fs.mkdir(path.dirname(backupPath), { recursive: true });
+			await Bun.write(backupPath, "old bundle");
+			await fs.mkdir(path.dirname(fixture.statePath), { recursive: true });
+			await Bun.write(
+				fixture.statePath,
+				`${JSON.stringify({
+					schemaVersion: 1,
+					channel: manifest.channel,
+					sourceCommit: manifest.sourceCommit,
+					bundleSha256: installedManifest.bundleSha256,
+					installedPath: fixture.installedPath,
+					backupPath,
+					updatePolicy: "managed_local_release_only",
+				})}\n`,
+			);
+
+			const result = await installBundle(fixture.bundlePath, installedManifest, {
+				home: fixture.home,
+				installedPath: fixture.installedPath,
+			});
+
+			expect(result.installed).toBe(false);
+			expect(await Bun.file(fixture.statePath).json()).toMatchObject({
+				schemaVersion: 2,
+				status: "active",
+				previousBundleSha256: crypto.createHash("sha256").update("old bundle").digest("hex"),
+			});
+		} finally {
+			await fs.rm(fixture.root, { recursive: true, force: true });
+		}
+	});
 
 	test("rejects a symlinked global install path without touching its destination", async () => {
 		const fixture = await tempInstall();

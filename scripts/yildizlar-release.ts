@@ -32,6 +32,16 @@ export type ReleaseReceipt = {
 	updatePolicy: "managed_local_release_only";
 };
 
+type LegacyReleaseReceipt = {
+	schemaVersion: 1;
+	channel: string;
+	sourceCommit: string;
+	bundleSha256: string;
+	installedPath: string;
+	backupPath: string;
+	updatePolicy: "managed_local_release_only";
+};
+
 export type InstallResult = {
 	installed: boolean;
 	backupPath: string;
@@ -259,7 +269,50 @@ function isPreparedReceipt(value: unknown): value is ReleaseReceipt {
 	);
 }
 
-async function activatePreparedReceiptIfCurrent(
+function isLegacyReleaseReceipt(value: unknown): value is LegacyReleaseReceipt {
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		!(
+			"schemaVersion" in value &&
+			"channel" in value &&
+			"sourceCommit" in value &&
+			"bundleSha256" in value &&
+			"installedPath" in value &&
+			"backupPath" in value &&
+			"updatePolicy" in value
+		)
+	) {
+		return false;
+	}
+	return (
+		value.schemaVersion === 1 &&
+		typeof value.channel === "string" &&
+		typeof value.sourceCommit === "string" &&
+		typeof value.bundleSha256 === "string" &&
+		typeof value.installedPath === "string" &&
+		typeof value.backupPath === "string" &&
+		value.updatePolicy === "managed_local_release_only"
+	);
+}
+
+function receiptMatchesCurrent(
+	receipt: { channel: string; sourceCommit: string; bundleSha256: string; installedPath: string; backupPath: string },
+	manifest: OwnedReleaseManifest,
+	installedPath: string,
+	backupPath: string,
+	installedBundleSha256: string,
+): boolean {
+	return (
+		receipt.channel === manifest.channel &&
+		receipt.sourceCommit === manifest.sourceCommit &&
+		receipt.bundleSha256 === installedBundleSha256 &&
+		receipt.installedPath === installedPath &&
+		receipt.backupPath === backupPath
+	);
+}
+
+async function reconcileReceiptIfCurrent(
 	statePath: string,
 	manifest: OwnedReleaseManifest,
 	installedPath: string,
@@ -272,21 +325,29 @@ async function activatePreparedReceiptIfCurrent(
 	await assertRegularFile(statePath, "existing release receipt");
 
 	const receipt = await Bun.file(statePath).json();
-	if (!isPreparedReceipt(receipt)) return;
-	if (
-		receipt.channel !== manifest.channel ||
-		receipt.sourceCommit !== manifest.sourceCommit ||
-		receipt.bundleSha256 !== installedBundleSha256 ||
-		receipt.installedPath !== installedPath ||
-		receipt.backupPath !== backupPath
-	) {
-		throw new Error("prepared release receipt does not match the installed bundle");
+	if (isPreparedReceipt(receipt)) {
+		if (!receiptMatchesCurrent(receipt, manifest, installedPath, backupPath, installedBundleSha256)) {
+			throw new Error("prepared release receipt does not match the installed bundle");
+		}
+		await assertRegularFile(backupPath, "prepared release backup");
+		if ((await sha256(backupPath)) !== receipt.previousBundleSha256) {
+			throw new Error("prepared release backup does not match its receipt");
+		}
+		await writeReceipt(statePath, { ...receipt, status: "active" });
+		return;
 	}
-	await assertRegularFile(backupPath, "prepared release backup");
-	if ((await sha256(backupPath)) !== receipt.previousBundleSha256) {
-		throw new Error("prepared release backup does not match its receipt");
+
+	if (!isLegacyReleaseReceipt(receipt)) return;
+	if (!receiptMatchesCurrent(receipt, manifest, installedPath, backupPath, installedBundleSha256)) {
+		throw new Error("legacy release receipt does not match the installed bundle");
 	}
-	await writeReceipt(statePath, { ...receipt, status: "active" });
+	await assertRegularFile(backupPath, "legacy release backup");
+	await writeReceipt(statePath, {
+		...receipt,
+		schemaVersion: 2,
+		status: "active",
+		previousBundleSha256: await sha256(backupPath),
+	});
 }
 
 export async function installBundle(
@@ -317,7 +378,7 @@ export async function installBundle(
 
 	const currentBundleSha256 = await sha256(installedPath);
 	if (currentBundleSha256 === manifest.bundleSha256) {
-		await activatePreparedReceiptIfCurrent(
+		await reconcileReceiptIfCurrent(
 			statePath,
 			manifest,
 			installedPath,
