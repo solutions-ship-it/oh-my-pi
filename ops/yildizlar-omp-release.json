@@ -1,6 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "channel": "yildizlar-local",
   "sourceCommit": "f164081c65e9d2059868d879ce42d4fc2a960d8c",
+  "releaseBranch": "yildizlar/omp-runtime",
+  "ownedRepository": "github.com/solutions-ship-it/oh-my-pi",
+  "upstreamRepository": "github.com/can1357/oh-my-pi",
+  "upstreamBranch": "main",
   "bundleSha256": "96ec22ca46f270b91c4547c260156a9af3d6ad0c5ca77f509fa549348640b770"
 }

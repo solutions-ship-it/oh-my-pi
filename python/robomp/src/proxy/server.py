@@ -422,7 +422,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(400, "invalid content-length") from exc
             if declared > max_bytes:
-                raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request body too large")
+                raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "request body too large")
         chunks: list[bytes] = []
         total = 0
         async for chunk in request.stream():
@@ -430,7 +430,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 continue
             total += len(chunk)
             if total > max_bytes:
-                raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request body too large")
+                raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "request body too large")
             chunks.append(chunk)
         body = b"".join(chunks)
         # Starlette's `request.body()` / `request.json()` re-read from

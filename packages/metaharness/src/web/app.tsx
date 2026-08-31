@@ -129,27 +129,54 @@ function useHashRoute(): string {
 }
 
 /** Poll a JSON endpoint on an interval (SSE covers the run list; details poll).
- *  Returns the latest payload plus a manual refresh for after mutations. */
-function usePolled<T>(url: string | null, intervalMs: number): [T | null, () => void] {
+ *  Returns the latest payload, a manual refresh, and the last visible failure. */
+function usePolled<T>(url: string | null, intervalMs: number): [T | null, () => void, string | null] {
 	const [data, setData] = useState<T | null>(null);
+	const [error, setError] = useState<string | null>(null);
 	const [nonce, setNonce] = useState(0);
 	useEffect(() => {
 		void nonce; // manual refresh dependency
+		setData(null);
+		setError(null);
 		if (!url) return;
 		let live = true;
-		const load = () =>
-			getJson<T>(url)
-				.then(d => live && setData(d))
-				.catch(() => {});
-		load();
-		const timer = setInterval(load, intervalMs);
+		const load = async () => {
+			try {
+				const next = await getJson<T>(url);
+				if (!live) return;
+				setData(next);
+				setError(null);
+			} catch (cause) {
+				if (live) setError(cause instanceof Error ? cause.message : "request failed");
+			}
+		};
+		void load();
+		const timer = setInterval(() => void load(), intervalMs);
 		return () => {
 			live = false;
 			clearInterval(timer);
 		};
 	}, [url, intervalMs, nonce]);
 	const refresh = useCallback(() => setNonce(n => n + 1), []);
-	return [data, refresh];
+	return [data, refresh, error];
+}
+
+function PollFailure({ error, onRetry, stale = false }: { error: string; onRetry: () => void; stale?: boolean }) {
+	return (
+		<div
+			role="alert"
+			className="mb-4 flex items-center justify-between gap-3 rounded border border-amber-800/70 bg-amber-950/30 px-3 py-2 text-sm text-amber-200"
+		>
+			<span>{stale ? `Showing last loaded data; refresh failed: ${error}` : `Could not load data: ${error}`}</span>
+			<button
+				type="button"
+				onClick={onRetry}
+				className="shrink-0 rounded border border-amber-700 px-2 py-0.5 text-xs hover:bg-amber-900/50"
+			>
+				retry
+			</button>
+		</div>
+	);
 }
 
 const INPUT_CLASS = "rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm";
@@ -199,10 +226,19 @@ function Progress({
 // ── experiments index ────────────────────────────────────────────────────────
 
 function ExperimentsIndex() {
-	const [experiments] = usePolled<ExperimentSummary[]>("/api/experiments", 3000);
-	if (!experiments) return <div className="p-10 text-zinc-500">loading…</div>;
+	const [experiments, refresh, error] = usePolled<ExperimentSummary[]>("/api/experiments", 3000);
+	if (!experiments) {
+		return error ? (
+			<div className="p-10">
+				<PollFailure error={error} onRetry={refresh} />
+			</div>
+		) : (
+			<div className="p-10 text-zinc-500">loading…</div>
+		);
+	}
 	return (
 		<div className="mx-auto grid max-w-5xl gap-3 p-6">
+			{error && <PollFailure error={error} onRetry={refresh} stale />}
 			{experiments.map(exp => (
 				<a
 					key={exp.id}
@@ -1476,9 +1512,17 @@ function ExperimentPage({ id }: { id: string }) {
 	const [sort, setSort] = useState<SortSpec | null>(null);
 	const [focusKey, setFocusKey] = useState<string | null>(null);
 	const [editing, setEditing] = useState<string | null>(null);
-	const [detail, refresh] = usePolled<ExperimentDetail>(`/api/experiments/${encodeURIComponent(id)}`, 3000);
+	const [detail, refresh, error] = usePolled<ExperimentDetail>(`/api/experiments/${encodeURIComponent(id)}`, 3000);
 	const toggleFocus = useCallback((key: string) => setFocusKey(f => (f === key ? null : key)), []);
-	if (!detail) return <div className="p-10 text-zinc-500">loading…</div>;
+	if (!detail) {
+		return error ? (
+			<div className="p-10">
+				<PollFailure error={error} onRetry={refresh} />
+			</div>
+		) : (
+			<div className="p-10 text-zinc-500">loading…</div>
+		);
+	}
 	const { arms, tasks, matrix, goal } = detail;
 
 	const focusArm = focusKey ? (arms.find(a => a.arm === focusKey) ?? null) : null;
@@ -1524,6 +1568,7 @@ function ExperimentPage({ id }: { id: string }) {
 
 	return (
 		<div className="mx-auto max-w-7xl p-6">
+			{error && <PollFailure error={error} onRetry={refresh} stale />}
 			<div className="mb-1 flex flex-wrap items-baseline gap-x-4 gap-y-1">
 				<h2 className="text-lg font-semibold">{id}</h2>
 				<span className="text-xs text-zinc-500">
@@ -1678,12 +1723,12 @@ function useRunsSse(): RunRow[] | null {
 
 function RunsPage({ selected }: { selected: string | null }) {
 	const runs = useRunsSse();
-	const [detail] = usePolled<{ run: RunRow; traces: TraceRow[] }>(
+	const [detail, refreshDetail, detailError] = usePolled<{ run: RunRow; traces: TraceRow[] }>(
 		selected ? `/api/runs/${encodeURIComponent(selected)}` : null,
 		2500,
 	);
 	const [trace, setTrace] = useState<string | null>(null);
-	const [traceData] = usePolled<{ entries: TranscriptEntry[] }>(
+	const [traceData, refreshTrace, traceError] = usePolled<{ entries: TranscriptEntry[] }>(
 		selected && trace
 			? `/api/runs/${encodeURIComponent(selected)}/traces/${encodeURIComponent(trace)}?tail=60`
 			: null,
@@ -1783,6 +1828,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 			<section className="flex flex-col overflow-hidden">
 				{detail ? (
 					<>
+						{detailError && <PollFailure error={detailError} onRetry={refreshDetail} stale />}
 						<div className="border-b border-zinc-800 px-4 py-2 text-sm">
 							<span className="font-semibold">{detail.run.jobName}</span> <Chip label={detail.run.status} />{" "}
 							<span className="text-xs text-zinc-500">
@@ -1821,6 +1867,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 						</div>
 						{trace && (
 							<div ref={traceRef} className="h-2/5 overflow-auto border-t border-zinc-800 bg-zinc-950/60">
+								{traceError && <PollFailure error={traceError} onRetry={refreshTrace} stale />}
 								{(traceData?.entries ?? []).map((e, i) => (
 									// biome-ignore lint/suspicious/noArrayIndexKey: tail window, entries have no ids
 									<div key={i} className="border-b border-zinc-900 px-4 py-2">
@@ -1843,6 +1890,10 @@ function RunsPage({ selected }: { selected: string | null }) {
 							</div>
 						)}
 					</>
+				) : detailError ? (
+					<div className="p-10">
+						<PollFailure error={detailError} onRetry={refreshDetail} />
+					</div>
 				) : (
 					<div className="p-10 text-zinc-500">select a run</div>
 				)}

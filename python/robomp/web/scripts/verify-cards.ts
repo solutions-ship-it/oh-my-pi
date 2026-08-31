@@ -300,6 +300,21 @@ async function main(): Promise<void> {
   });
 
   const page = await browser.newPage();
+
+  const consoleErrors: string[] = [];
+  const unexpectedDialogs: string[] = [];
+  let confirmDecision: boolean | null = null;
+  page.on("console", message => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", error => consoleErrors.push(`pageerror: ${error.message}`));
+  page.on("dialog", dialog => {
+    const isExpectedConfirm = dialog.type() === "confirm" && confirmDecision !== null;
+    if (!isExpectedConfirm) unexpectedDialogs.push(`${dialog.type()}: ${dialog.message()}`);
+    const decision = isExpectedConfirm && confirmDecision ? dialog.accept() : dialog.dismiss();
+    void decision.catch(error => consoleErrors.push(`dialog decision: ${error.message}`));
+  });
+
   await page.setRequestInterception(true);
 
   let statusMock: StatusResponse = baseStatus;
@@ -445,6 +460,14 @@ async function main(): Promise<void> {
   };
 
   // 3. Populated state - Dark Theme
+
+  const REPLAY_TOKEN = "trigger-secret";
+  const replayResp = await fetch(BASE_URL);
+  const replayHtml = (await replayResp.text()).replace(
+    /<script id="robomp-config" type="application\/json">[^<]*<\/script>/,
+    `<script id="robomp-config" type="application/json">{"replayEnabled":true,"replayToken":"${REPLAY_TOKEN}"}</script>`,
+  );
+  customIndexHtml = replayHtml;
   statusMock = populatedStatus;
   await page.goto(BASE_URL, { waitUntil: "networkidle0" });
   await applyTheme("dark");
@@ -986,16 +1009,8 @@ async function main(): Promise<void> {
   // Restore media features
   await page.emulateMediaFeatures([]);
 
-  // 8. Interactions (clicks).
-  // Serve a replay-enabled index with a KNOWN token so every privileged
-  // request carries an auditable `X-Robomp-Replay-Token: trigger-secret`
-  // header, independent of whatever token the live server was started with.
-  const REPLAY_TOKEN = "trigger-secret";
-  const replayResp = await fetch(BASE_URL);
-  const replayHtml = (await replayResp.text()).replace(
-    /<script id="robomp-config" type="application\/json">[^<]*<\/script>/,
-    `<script id="robomp-config" type="application/json">{"replayEnabled":true,"replayToken":"${REPLAY_TOKEN}"}</script>`,
-  );
+  // 8. Interactions (clicks). Reload the known replay-enabled index so every
+  // privileged request carries the test token regardless of server config.
   customIndexHtml = replayHtml;
   statusMock = populatedStatus;
   await page.goto(BASE_URL, { waitUntil: "networkidle0" });
@@ -1022,13 +1037,14 @@ async function main(): Promise<void> {
   // B. Cancel click (confirm accepted) — exactly one POST /api/cancel
   //    {delivery_id} carrying the replay token.
   triggeredRequests.length = 0;
+  confirmDecision = true;
   await page.evaluate(() => {
-    window.confirm = () => true;
     const card = Array.from(document.querySelectorAll(".rmp-card")).find(c => c.querySelector(".rmp-card-id")?.textContent?.includes("octo/widget#2"));
     const btn = card?.querySelector("button.danger") as HTMLElement | null;
     btn?.click();
   });
   await Bun.sleep(100);
+  confirmDecision = null;
   const cancelReqs = triggeredRequests.filter(
     (r) => r.url.endsWith("/api/cancel") && r.body?.delivery_id === "run-del-2",
   );
@@ -1042,13 +1058,14 @@ async function main(): Promise<void> {
   // C. Cancel click (confirm dismissed) — verbatim confirm gate suppresses the
   //    request entirely; assert zero /api/cancel requests fire.
   triggeredRequests.length = 0;
+  confirmDecision = false;
   await page.evaluate(() => {
-    window.confirm = () => false;
     const card = Array.from(document.querySelectorAll(".rmp-card")).find(c => c.querySelector(".rmp-card-id")?.textContent?.includes("octo/widget#2"));
     const btn = card?.querySelector("button.danger") as HTMLElement | null;
     btn?.click();
   });
   await Bun.sleep(100);
+  confirmDecision = null;
   const dismissedCancelReqs = triggeredRequests.filter((r) => r.url.endsWith("/api/cancel"));
   results.push({
     name: "interaction-cancel-click-dismissed",
@@ -1108,6 +1125,12 @@ async function main(): Promise<void> {
     detail: `Matching enter requests: ${enterReqs.length}, token: "${enterReqs[0]?.headers["x-robomp-replay-token"] ?? ""}"`,
   });
 
+  results.push({
+    name: "browser-no-unexpected-errors",
+    ok: consoleErrors.length === 0 && unexpectedDialogs.length === 0,
+    detail: `Console errors: ${JSON.stringify(consoleErrors)}. Unexpected dialogs: ${JSON.stringify(unexpectedDialogs)}.`,
+  });
+
   // G. Activity-view retry failure — switching to Activity and retrying a
   //    failed event must surface the trigger error WHERE the button was
   //    clicked (the Trigger bar lives only on Operations/Triage). Force
@@ -1163,6 +1186,7 @@ async function main(): Promise<void> {
   await page.screenshot({ path: path.join(outDir, "shots/activity-retry-error.png") });
 
   customIndexHtml = null; // restore real-index interception
+
 
   // Cleanup browser
   await browser.close();
