@@ -18,6 +18,7 @@ const manifest: OwnedReleaseManifest = {
 	releaseBranch: "yildizlar/omp-runtime",
 	ownedRepository: "github.com/solutions-ship-it/oh-my-pi",
 	bundleSha256: "96ec22ca46f270b91c4547c260156a9af3d6ad0c5ca77f509fa549348640b770",
+	status: "active",
 };
 
 const releaseContext: ReleaseContext = {
@@ -100,6 +101,89 @@ describe("Yildizlar-owned OMP release", () => {
 		expect(validateOwnedRelease(manifest, releaseContext, "0".repeat(64))).toEqual({
 			ok: false,
 			reason: "bundle hash does not match manifest",
+		});
+	});
+
+	test("rejects a superseded lane fail-closed, and every non-active lifecycle value", () => {
+		// Regression: marking the lane superseded used to be metadata only —
+		// `manifestError` never read `status`, so `--install` would happily
+		// reinstall the retired lane's stale bundle and downgrade the runtime.
+		expect(
+			validateOwnedRelease({ ...manifest, status: "superseded" }, releaseContext, manifest.bundleSha256),
+		).toEqual({
+			ok: false,
+			reason: "manifest lifecycle status is not active (superseded); this lane must not be installed",
+		});
+
+		// Unknown or wrongly-typed lifecycle states are NOT evidence of health.
+		for (const bad of ["retired", "prepared", "", "ACTIVE", " active"]) {
+			expect(validateOwnedRelease({ ...manifest, status: bad }, releaseContext, manifest.bundleSha256)).toEqual({
+				ok: false,
+				reason: `manifest lifecycle status is not active (${bad}); this lane must not be installed`,
+			});
+		}
+		for (const bad of [true, 1, null, {}, []]) {
+			expect(validateOwnedRelease({ ...manifest, status: bad }, releaseContext, manifest.bundleSha256)).toEqual({
+				ok: false,
+				reason: `manifest lifecycle status is not active (${typeof bad}); this lane must not be installed`,
+			});
+		}
+	});
+
+	test("requires the lifecycle status: a MISSING field is rejected, not treated as legacy-ok", () => {
+		// Fail-closed: if absence were allowed, a producer could bypass the gate
+		// simply by dropping the key.
+		const { status: _dropped, ...withoutStatus } = manifest;
+		expect("status" in withoutStatus).toBe(false);
+		expect(validateOwnedRelease(withoutStatus, releaseContext, manifest.bundleSha256)).toEqual({
+			ok: false,
+			reason: "manifest lifecycle status is missing; this lane must not be installed",
+		});
+		expect(validateOwnedRelease(manifest, releaseContext, manifest.bundleSha256)).toEqual({ ok: true });
+		expect(manifest.status).toBe("active");
+	});
+
+	test("message contract: malformed shape says identity, well-shaped-but-status-less says lifecycle", () => {
+		// Regression guard: collapsing the shape check and the status-presence
+		// check made `{}` report "status is missing", which is fail-closed but
+		// misleading for an operator triaging a malformed manifest.
+		expect(validateOwnedRelease({}, releaseContext, manifest.bundleSha256)).toEqual({
+			ok: false,
+			reason: "manifest identity is invalid",
+		});
+		expect(validateOwnedRelease(null, releaseContext, manifest.bundleSha256)).toEqual({
+			ok: false,
+			reason: "manifest identity is invalid",
+		});
+		expect(validateOwnedRelease("nope", releaseContext, manifest.bundleSha256)).toEqual({
+			ok: false,
+			reason: "manifest identity is invalid",
+		});
+
+		const { status: _dropped, ...wellShapedNoStatus } = manifest;
+		expect(validateOwnedRelease(wellShapedNoStatus, releaseContext, manifest.bundleSha256)).toEqual({
+			ok: false,
+			reason: "manifest lifecycle status is missing; this lane must not be installed",
+		});
+
+		// ÖNCELİK: lifecycle mesajı YALNIZ identity+pins geçen manifest için.
+		// Bir status'suz manifest aynı zamanda kimlik veya pin hatası taşıyorsa
+		// eski, daha teşhis-değerli mesajı almaya devam eder.
+		expect(
+			validateOwnedRelease({ ...wellShapedNoStatus, schemaVersion: 1 }, releaseContext, manifest.bundleSha256),
+		).toEqual({ ok: false, reason: "manifest identity is invalid" });
+		expect(
+			validateOwnedRelease({ ...wellShapedNoStatus, sourceCommit: "kisa" }, releaseContext, manifest.bundleSha256),
+		).toEqual({ ok: false, reason: "manifest pins are invalid" });
+	});
+
+	test("a present-but-undefined status is still rejected (own-property, not value, decides)", () => {
+		// `{...manifest, status: undefined}` HAS the key. Reading it with a
+		// truthiness or `!== undefined` check would let it through; the gate uses
+		// Object.hasOwn so the key's presence is what matters.
+		expect(validateOwnedRelease({ ...manifest, status: undefined }, releaseContext, manifest.bundleSha256)).toEqual({
+			ok: false,
+			reason: "manifest lifecycle status is not active (undefined); this lane must not be installed",
 		});
 	});
 

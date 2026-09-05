@@ -88,6 +88,12 @@ function isUpstreamReviewManifest(value: unknown): value is UpstreamReviewManife
 		"releaseBranch" in value &&
 		"ownedRepository" in value &&
 		"bundleSha256" in value &&
+		// `status` is REQUIRED on OwnedReleaseManifest, so the predicate must
+		// verify the key exists — otherwise it narrows to a type that promises a
+		// field the value may not have. Its VALUE is intentionally not checked
+		// here (see the note on `upstreamManifestError` below); only the install
+		// path enforces `status === "active"`.
+		"status" in value &&
 		"upstreamRepository" in value &&
 		"upstreamBranch" in value &&
 		typeof value.schemaVersion === "number" &&
@@ -101,7 +107,25 @@ function isUpstreamReviewManifest(value: unknown): value is UpstreamReviewManife
 	);
 }
 
-function upstreamManifestError(value: unknown): string | null {
+/**
+ * NOTE (2026-09-05): this validator deliberately does NOT apply the manifest
+ * lifecycle gate that `yildizlar-release.ts` `manifestError` enforces
+ * (`status` must be exactly `"active"`).
+ *
+ * Rationale, not drift: this tool produces a review report and never installs
+ * or mutates the working tree — it reports `installAllowed: false`. It is not
+ * strictly read-only though: `main` runs `git fetch --no-tags upstream …`
+ * (see the `gitText(root, "fetch", …)` call below), which updates local Git
+ * object/ref metadata. Gating review on `status !== "active"` would block the
+ * very review needed to decide whether a retired lane should be revived. The
+ * install path is where fail-closed matters, and that gate lives in
+ * `yildizlar-release.ts` with its regression test in
+ * `yildizlar-release.test.ts`.
+ *
+ * If this file ever gains an install/mutation path, the lifecycle gate MUST be
+ * applied here too.
+ */
+export function upstreamManifestError(value: unknown): string | null {
 	if (!isUpstreamReviewManifest(value)) return "release manifest is invalid";
 	if (!normalizeGitHubRepository(value.upstreamRepository) || !branchPattern.test(value.upstreamBranch)) {
 		return "release manifest is invalid";

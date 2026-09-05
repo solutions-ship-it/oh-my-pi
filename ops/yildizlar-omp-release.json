@@ -1,10 +1,20 @@
 {
   "schemaVersion": 2,
   "channel": "yildizlar-local",
+  "status": "superseded",
   "sourceCommit": "f164081c65e9d2059868d879ce42d4fc2a960d8c",
   "releaseBranch": "yildizlar/omp-runtime",
   "ownedRepository": "github.com/solutions-ship-it/oh-my-pi",
   "upstreamRepository": "github.com/can1357/oh-my-pi",
   "upstreamBranch": "main",
-  "bundleSha256": "96ec22ca46f270b91c4547c260156a9af3d6ad0c5ca77f509fa549348640b770"
+  "bundleSha256": "96ec22ca46f270b91c4547c260156a9af3d6ad0c5ca77f509fa549348640b770",
+  "supersededBy": {
+    "at": "2026-09-05T12:17:00Z",
+    "reason": "This lane existed only to carry PR can1357/oh-my-pi#10365 (f164081c, retry-fallback-chains OpenCode usage-wait fix) before it shipped upstream. The fix landed in v18.1.4, so the pins above are now behind the official release.",
+    "officialRelease": "v18.1.10",
+    "officialBinarySha256": "f93613f5cc66a22e4368e955f7d121b9508306d4153b2932318e5d45ecf13a44",
+    "installedPath": "/Users/akin/.local/bin/omp",
+    "operationalState": "/Users/akin/.omp/agent/state/omp-f164-hotpatch.json",
+    "note": "The pinned sourceCommit/bundleSha256 are retained unchanged for audit. Do NOT run this lane's --install: it would downgrade the runtime to the f164 bundle. Retiring this lane (repo + manifest + scripts) is a separate decision that still needs approval."
+  }
 }

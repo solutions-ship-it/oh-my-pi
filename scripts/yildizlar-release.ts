@@ -1,8 +1,25 @@
 import * as crypto from "node:crypto";
+// `Stats` is declared in `node:fs`, NOT in `node:fs/promises` (which re-uses the
+// interface but does not export it). Referencing `fs.Stats` here produced
+// TS2724 under the project's `strict` config; a type-only import fixes it
+// without touching runtime behaviour.
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 
+/**
+ * Owned-lane release manifest.
+ *
+ * `status` is the lane LIFECYCLE gate and is REQUIRED. It MUST be exactly
+ * `"active"` for an install to proceed. A missing field is rejected too:
+ * treating absence as "fine" would let a producer silently bypass the gate by
+ * dropping the key, which is the opposite of fail-closed. Any other value —
+ * notably `"superseded"` — fails FAIL-CLOSED, so a retired lane cannot
+ * downgrade the runtime by reinstalling its stale `bundleSha256`. Unknown or
+ * wrongly-typed values are rejected: an unrecognised lifecycle state is not
+ * evidence of health.
+ */
 export type OwnedReleaseManifest = {
 	schemaVersion: number;
 	channel: string;
@@ -10,6 +27,7 @@ export type OwnedReleaseManifest = {
 	releaseBranch: string;
 	ownedRepository: string;
 	bundleSha256: string;
+	status: unknown;
 };
 
 export type ReleaseContext = {
@@ -55,7 +73,16 @@ const sourceCommitPattern = /^[0-9a-f]{40}$/;
 const bundleHashPattern = /^[0-9a-f]{64}$/;
 const repositoryPattern = /^github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-function isOwnedReleaseManifest(value: unknown): value is OwnedReleaseManifest {
+/**
+ * Structural shape WITHOUT the lifecycle field.
+ *
+ * Split out so `manifestError` can keep precise messages: a value that is
+ * malformed in its identity/pins must still report "identity is invalid",
+ * while a well-shaped value that merely lacks `status` reports the specific
+ * lifecycle message. Collapsing the two produced a message-contract
+ * regression (`{}` started reporting "status is missing").
+ */
+function hasOwnedReleaseShape(value: unknown): value is Omit<OwnedReleaseManifest, "status"> {
 	if (typeof value !== "object" || value === null) return false;
 	const manifest = value as {
 		schemaVersion?: unknown;
@@ -74,6 +101,14 @@ function isOwnedReleaseManifest(value: unknown): value is OwnedReleaseManifest {
 		typeof manifest.bundleSha256 === "string"
 	);
 }
+
+function isOwnedReleaseManifest(value: unknown): value is OwnedReleaseManifest {
+	// `status` is REQUIRED on OwnedReleaseManifest, so the predicate must verify
+	// the KEY exists — otherwise it narrows to a type promising a field the
+	// value may not have. The VALUE is gated in `manifestError` (must be exactly
+	// "active"), which is where fail-closed install policy lives.
+	return hasOwnedReleaseShape(value) && Object.hasOwn(value, "status");
+}
 export function normalizeGitHubRepository(value: string): string | null {
 	const normalized = value.trim().replace(/\.git$/, "");
 	const httpsMatch = normalized.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/);
@@ -84,7 +119,17 @@ export function normalizeGitHubRepository(value: string): string | null {
 }
 
 function manifestError(manifest: unknown): string | null {
-	if (!isOwnedReleaseManifest(manifest) || manifest.schemaVersion !== 2 || manifest.channel !== "yildizlar-local") {
+	// SIRA SÖZLEŞMESİ (orijinal öncelik BİREBİR korunur): identity → pins →
+	// lifecycle. Lifecycle mesajı YALNIZ kimlik ve pin doğrulamalarını GEÇEN bir
+	// manifest için üretilir. Aksi halde `{}`, `schemaVersion: 1` veya bozuk pin
+	// içeren girdiler eskiden aldıkları "identity/pins is invalid" yerine
+	// lifecycle mesajı alır ve operatör teşhisi bozulur (ölçülen regresyon).
+	//
+	// Kimlik aşaması `isOwnedReleaseManifest` DEĞİL `hasOwnedReleaseShape`
+	// kullanır: tam guard artık `status` anahtarını da şart koştuğu için,
+	// status'suz bir manifest kimlik aşamasında düşer ve özel lifecycle mesajına
+	// hiç ulaşamazdı.
+	if (!hasOwnedReleaseShape(manifest) || manifest.schemaVersion !== 2 || manifest.channel !== "yildizlar-local") {
 		return "manifest identity is invalid";
 	}
 	if (
@@ -94,6 +139,17 @@ function manifestError(manifest: unknown): string | null {
 		!repositoryPattern.test(manifest.ownedRepository)
 	) {
 		return "manifest pins are invalid";
+	}
+	// LIFECYCLE GATE (fail-closed). `status` REQUIRED and must be exactly
+	// "active"; absence, "superseded"/"retired"/unknown values and non-strings
+	// all reject. Without this gate, marking a lane superseded was metadata only
+	// and `--install` would reinstall its stale bundle, downgrading the runtime.
+	if (!isOwnedReleaseManifest(manifest)) {
+		return "manifest lifecycle status is missing; this lane must not be installed";
+	}
+	if (manifest.status !== "active") {
+		const shown = typeof manifest.status === "string" ? manifest.status : typeof manifest.status;
+		return `manifest lifecycle status is not active (${shown}); this lane must not be installed`;
 	}
 	return null;
 }
@@ -105,6 +161,12 @@ export function validateOwnedRelease(
 ): ReleaseValidation {
 	const invalidManifest = manifestError(manifest);
 	if (invalidManifest) return { ok: false, reason: invalidManifest };
+	// NARROWING (fixes 3x TS18046 under `strict`): `manifestError` already
+	// returns non-null for anything that fails `isOwnedReleaseManifest`, so this
+	// check is runtime-redundant and behaviour-preserving — but TypeScript
+	// cannot infer that from a `string | null` return, so the field reads below
+	// were operating on `unknown`.
+	if (!isOwnedReleaseManifest(manifest)) return { ok: false, reason: "manifest identity is invalid" };
 	if (!context.isClean) return { ok: false, reason: "release checkout is not clean" };
 	if (context.branch !== manifest.releaseBranch)
 		return { ok: false, reason: "release branch does not match manifest" };
@@ -139,7 +201,7 @@ function assertPathWithin(home: string, targetPath: string): void {
 	}
 }
 
-async function lstatOrNull(targetPath: string): Promise<fs.Stats | null> {
+async function lstatOrNull(targetPath: string): Promise<Stats | null> {
 	try {
 		return await fs.lstat(targetPath);
 	} catch (error) {
