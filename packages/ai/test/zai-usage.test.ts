@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
 import { zaiRankingStrategy, zaiUsageProvider } from "@oh-my-pi/pi-ai/usage/zai";
@@ -10,7 +10,7 @@ function makeCredential(): UsageFetchParams["credential"] {
 	};
 }
 
-function makeCtx(payload: unknown): UsageFetchContext {
+function makeCtx(payload: unknown, logger?: UsageFetchContext["logger"]): UsageFetchContext {
 	const fetch: FetchImpl = async input => {
 		const url = String(input);
 		if (url.includes("/api/monitor/usage/model-usage")) {
@@ -24,7 +24,7 @@ function makeCtx(payload: unknown): UsageFetchContext {
 			headers: { "content-type": "application/json" },
 		});
 	};
-	return { fetch };
+	return { fetch, logger };
 }
 
 function makeOAuthCredential(): UsageFetchParams["credential"] {
@@ -236,5 +236,31 @@ describe("zai usage provider", () => {
 		const ranked = zaiRankingStrategy.findWindowLimits(report!);
 		expect(ranked.primary?.id).toBe("zai:tokens:5h");
 		expect(ranked.secondary?.id).toBe("zai:tokens:1w");
+	});
+
+	it("classifies a missing coding plan as debug while warning for other failed quota payloads", async () => {
+		const logger = { debug: vi.fn(), warn: vi.fn() };
+		const noPlan = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({ success: false, code: 403, msg: "当前用户不存在coding plan" }, logger),
+		);
+
+		expect(noPlan).toBeNull();
+		expect(logger.debug).toHaveBeenCalledWith("ZAI account has no coding plan; no quota info", {
+			code: 403,
+			message: "当前用户不存在coding plan",
+		});
+		expect(logger.warn).not.toHaveBeenCalled();
+
+		const invalidPayload = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({ success: false, code: 503, msg: "upstream unavailable" }, logger),
+		);
+
+		expect(invalidPayload).toBeNull();
+		expect(logger.warn).toHaveBeenCalledWith("ZAI usage response invalid", {
+			code: 503,
+			message: "upstream unavailable",
+		});
 	});
 });

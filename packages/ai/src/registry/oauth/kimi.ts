@@ -14,7 +14,8 @@ import { isRecord } from "../../utils";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
-const DEFAULT_OAUTH_HOST = "https://auth.kimi.com";
+// Global Kimi Code accounts authorize on kimi.ai; the .com host serves the mainland surface.
+const DEFAULT_OAUTH_HOST = "https://auth.kimi.ai";
 const DEVICE_ID_FILENAME = "kimi-device-id";
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_DEVICE_FLOW_TTL_MS = 15 * 60 * 1000;

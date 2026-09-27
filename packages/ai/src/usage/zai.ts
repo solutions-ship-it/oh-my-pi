@@ -268,7 +268,17 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 
 	if (!payload) return null;
 	if (payload.success !== true) {
-		ctx.logger?.warn("ZAI usage response invalid", { code: payload.code, message: payload.msg });
+		// An account without a coding plan legitimately returns success:false and
+		// "当前用户不存在coding plan"; it has no quota rather than a failed fetch.
+		const noCodingPlan = typeof payload.msg === "string" && payload.msg.includes("coding plan");
+		if (noCodingPlan) {
+			ctx.logger?.debug("ZAI account has no coding plan; no quota info", {
+				code: payload.code,
+				message: payload.msg,
+			});
+		} else {
+			ctx.logger?.warn("ZAI usage response invalid", { code: payload.code, message: payload.msg });
+		}
 		return null;
 	}
 
