@@ -329,6 +329,19 @@ export interface ToolCallEventResult {
 	 * write gate's approval and faces the full prompt again.
 	 */
 	input?: Record<string, unknown>;
+	/**
+	 * Task-only deferred agent selection. The resolver runs only after every
+	 * non-blocking tool-call handler has accepted the final guarded input.
+	 */
+	taskRoute?: TaskRouteReservation;
+}
+
+/** Extension-owned reservation for selecting one permitted task agent. */
+export interface TaskRouteReservation {
+	/** Agent names the resolver may choose; this never reaches the task schema. */
+	agents: string[];
+	/** Returns the guarded task input with only its agent selection changed. */
+	resolve: (signal: AbortSignal) => Promise<Record<string, unknown>>;
 }
 
 /**

@@ -31,6 +31,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/comp
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { applyTodoOperation } from "../../tools/todo";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
 const MAX_WIDGET_LINES = 10;
@@ -179,6 +180,13 @@ export class ExtensionUiController {
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
+			},
+			applyTodoOperation: input => {
+				const result = applyTodoOperation(this.ctx.session, input);
+				if (result.outcome === "applied" && input.op === "done") {
+					void this.ctx.reloadTodos(this.ctx.session).catch(() => this.ctx.showStatus("Todo UI refresh failed"));
+				}
+				return result;
 			},
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
@@ -412,6 +420,13 @@ export class ExtensionUiController {
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
+			},
+			applyTodoOperation: input => {
+				const result = applyTodoOperation(this.ctx.session, input);
+				if (result.outcome === "applied" && input.op === "done") {
+					void this.ctx.reloadTodos(this.ctx.session).catch(() => this.ctx.showStatus("Todo UI refresh failed"));
+				}
+				return result;
 			},
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);

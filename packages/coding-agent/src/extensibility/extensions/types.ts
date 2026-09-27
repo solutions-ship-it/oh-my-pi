@@ -75,6 +75,8 @@ import type {
 	GrepToolInput,
 	ReadToolDetails,
 	ReadToolInput,
+	TodoOperationInput,
+	TodoOperationResult,
 	WriteToolInput,
 } from "../../tools";
 import type { ApprovalMode } from "../../tools/approval";
@@ -1436,6 +1438,8 @@ export interface ExtensionAPI {
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
+	/** Compare-and-set native todo state for this exact session. */
+	applyTodoOperation(input: TodoOperationInput): TodoOperationResult;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1688,6 +1692,7 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	applyTodoOperation?: (input: TodoOperationInput) => TodoOperationResult;
 	setLabel: (targetId: string, label: string | undefined) => void;
 	getActiveTools: GetActiveToolsHandler;
 	getAllTools: GetAllToolsHandler;

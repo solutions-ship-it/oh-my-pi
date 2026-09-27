@@ -61,6 +61,31 @@ export interface TodoToolDetails {
 	storage: "session" | "memory";
 	completedTasks?: TodoCompletionTransition[];
 }
+/** Narrow native mutation surface exposed to extensions for verified closure. */
+export interface TodoOperationInput {
+	sessionId: string;
+	expectedDigest?: string;
+	op: "view" | "done";
+	task?: string;
+}
+
+export interface TodoOperationResult {
+	outcome: "applied" | "stale" | "cross_session" | "invalid";
+	currentDigest: string;
+	appliedDigest?: string;
+	phases: TodoPhase[];
+	completedTasks?: TodoCompletionTransition[];
+	errors?: string[];
+}
+
+export interface TodoOperationSession {
+	getTodoPhases(): TodoPhase[];
+	setTodoPhases(phases: TodoPhase[]): void;
+	sessionManager: {
+		getSessionId(): string;
+		appendCustomEntry<T = unknown>(customType: string, data?: T): void;
+	};
+}
 
 // =============================================================================
 // Schema
@@ -649,6 +674,77 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		}
 	}
 	return `${out.join("\n")}\n`;
+}
+/** Canonical, unambiguous digest used for compare-and-set todo mutations. */
+export function todoPhasesDigest(phases: TodoPhase[]): string {
+	const canonical = phases.map(phase => [
+		phase.name,
+		phase.tasks.map(task => [task.content, task.status, task.blocker ?? null]),
+	]);
+	return new Bun.CryptoHasher("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/**
+ * Apply the extension-safe native todo operations.
+ *
+ * Completion is bound to this exact session and to the caller's observed todo
+ * digest. State and the reload-survival entry are updated through the same pair
+ * used by the native /todo editor.
+ */
+export function applyTodoOperation(session: TodoOperationSession, input: TodoOperationInput): TodoOperationResult {
+	const previous = clonePhases(session.getTodoPhases());
+	const currentDigest = todoPhasesDigest(previous);
+	if (session.sessionManager.getSessionId() !== input.sessionId) {
+		return { outcome: "cross_session", currentDigest, phases: previous };
+	}
+	if (input.op === "view") {
+		return { outcome: "applied", currentDigest, appliedDigest: currentDigest, phases: previous };
+	}
+	if (input.op !== "done" || typeof input.task !== "string" || input.task.length === 0) {
+		return { outcome: "invalid", currentDigest, phases: previous, errors: ["done requires a task"] };
+	}
+	if (typeof input.expectedDigest !== "string" || /^[a-f0-9]{64}$/.test(input.expectedDigest) === false) {
+		return { outcome: "invalid", currentDigest, phases: previous, errors: ["done requires a full todo digest"] };
+	}
+	if (input.expectedDigest !== currentDigest) {
+		return { outcome: "stale", currentDigest, phases: previous };
+	}
+	const matches = previous.flatMap(phase => phase.tasks.filter(task => task.content === input.task));
+	if (matches.length !== 1 || matches[0]?.status !== "in_progress") {
+		return {
+			outcome: "invalid",
+			currentDigest,
+			phases: previous,
+			errors: [matches.length === 1 ? "done task is not in progress" : "done task content must be globally unique"],
+		};
+	}
+	const resolved = resolveTodoParams({ op: "done", task: input.task }, previous.length > 0);
+	if (typeof resolved === "string") {
+		return { outcome: "invalid", currentDigest, phases: previous, errors: [resolved] };
+	}
+	const { phases: updated, errors } = applyParams(clonePhases(previous), resolved);
+	if (errors.length > 0) {
+		return { outcome: "invalid", currentDigest, phases: previous, errors };
+	}
+	const completedTasks = getCompletionTransitions(previous, updated);
+	if (completedTasks.length !== 1 || completedTasks[0]?.content !== input.task) {
+		return { outcome: "invalid", currentDigest, phases: previous, errors: ["done transition is ambiguous"] };
+	}
+	const observed = clonePhases(session.getTodoPhases());
+	const observedDigest = todoPhasesDigest(observed);
+	if (observedDigest !== input.expectedDigest) {
+		return { outcome: "stale", currentDigest: observedDigest, phases: observed };
+	}
+	session.setTodoPhases(updated);
+	session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: updated });
+	const appliedDigest = todoPhasesDigest(updated);
+	return {
+		outcome: "applied",
+		currentDigest: appliedDigest,
+		appliedDigest,
+		phases: clonePhases(updated),
+		completedTasks,
+	};
 }
 
 const MARKER_TO_STATUS: Record<string, TodoStatus> = {

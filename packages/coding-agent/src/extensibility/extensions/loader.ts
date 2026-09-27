@@ -29,6 +29,7 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
+import type { TodoOperationInput, TodoOperationResult } from "../../tools/todo";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -94,6 +95,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	appendEntry(): void {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+	applyTodoOperation(_input: TodoOperationInput): TodoOperationResult {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -272,6 +276,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	appendEntry(customType: string, data?: unknown): void {
 		this.runtime.appendEntry(customType, data);
+	}
+	applyTodoOperation(input: TodoOperationInput): TodoOperationResult {
+		const apply = this.runtime.applyTodoOperation;
+		if (apply === undefined) throw new ExtensionRuntimeNotInitializedError();
+		return apply(input);
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {

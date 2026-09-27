@@ -90,6 +90,9 @@ function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
 }
 
+function throwUnsupportedTodoAction(): never {
+	throw new Error("This extension host does not support native todo actions");
+}
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
 }
@@ -313,6 +316,58 @@ async function raceHandlerWithTimeout<T>(
 	} finally {
 		settle();
 		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
+/** Resolve only an extension-reserved task agent; all other guarded fields stay unchanged. */
+export async function resolveDeferredTaskRoute(
+	result: ToolCallEventResult,
+	parent?: AbortSignal,
+	timeoutMs = 3000,
+): Promise<ToolCallEventResult> {
+	const route = result.taskRoute;
+	if (!route) return result;
+	const { taskRoute: _taskRoute, ...guarded } = result;
+	const input = result.input;
+	if (
+		!input ||
+		!Array.isArray(route.agents) ||
+		route.agents.length === 0 ||
+		route.agents.some(agent => typeof agent !== "string" || agent.trim().length === 0) ||
+		typeof route.resolve !== "function"
+	) {
+		return { block: true, reason: "Deferred task routing requires a valid extension-owned reservation" };
+	}
+
+	const controller = new AbortController();
+	const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+	if (signal.aborted) return { block: true, reason: "Deferred task routing cancelled" };
+	const { promise: aborted, reject: rejectAborted } = Promise.withResolvers<never>();
+	const onAbort = () => rejectAborted(signal.reason ?? new Error("Deferred task routing cancelled"));
+	signal.addEventListener("abort", onAbort, { once: true });
+	const timer = setTimeout(
+		() => controller.abort(new DOMException("Deferred task routing timeout", "TimeoutError")),
+		Math.max(0, timeoutMs),
+	);
+	try {
+		const routed = await Promise.race([route.resolve(signal), aborted]);
+		if (signal.aborted) return { block: true, reason: "Deferred task routing cancelled" };
+		if (!routed || typeof routed.agent !== "string" || !route.agents.includes(routed.agent)) {
+			return { block: true, reason: "Deferred task routing returned an unreserved agent" };
+		}
+		const { agent: _originalAgent, ...original } = input;
+		const { agent: _routedAgent, ...candidate } = routed;
+		if (JSON.stringify(original) !== JSON.stringify(candidate)) {
+			return { block: true, reason: "Deferred task routing changed task arguments" };
+		}
+		return { ...guarded, input: routed };
+	} catch {
+		if (parent?.aborted) return { block: true, reason: "Deferred task routing cancelled" };
+		return { ...guarded, input };
+	} finally {
+		clearTimeout(timer);
+		signal.removeEventListener("abort", onAbort);
+		controller.abort();
 	}
 }
 
@@ -654,6 +709,7 @@ export class ExtensionRunner {
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
+		this.runtime.applyTodoOperation = actions.applyTodoOperation ?? throwUnsupportedTodoAction;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = async toolNames => {
@@ -1466,7 +1522,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
+				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
 					ctx,
@@ -1480,19 +1536,34 @@ export class ExtensionRunner {
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,
-				);
+				)) as ToolCallEventResult | undefined;
 
 				if (handlerResult) {
-					result = handlerResult;
-					if (result.block) {
-						return result;
-					}
+					const prior = result;
+					const taskRoute =
+						handlerResult.taskRoute ?? (handlerResult.input !== undefined ? undefined : prior?.taskRoute);
+					result = {
+						...(prior?.block !== undefined ? { block: prior.block } : {}),
+						...(handlerResult.block !== undefined ? { block: handlerResult.block } : {}),
+						...(prior?.reason !== undefined ? { reason: prior.reason } : {}),
+						...(handlerResult.reason !== undefined ? { reason: handlerResult.reason } : {}),
+						...(prior?.input !== undefined ? { input: prior.input } : {}),
+						...(handlerResult.input !== undefined ? { input: handlerResult.input } : {}),
+						...(taskRoute ? { taskRoute } : {}),
+					};
+					if (result.block) return result;
 				}
 			}
 		}
 
 		if (signal?.aborted) {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
+		}
+		if (result?.taskRoute) {
+			if (event.toolName !== "task") {
+				return { block: true, reason: "Deferred task routing is only valid for task tool calls" };
+			}
+			return resolveDeferredTaskRoute(result, signal);
 		}
 		return result;
 	}

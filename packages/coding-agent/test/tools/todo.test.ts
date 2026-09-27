@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	applyTodoOperation,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
@@ -17,6 +18,7 @@ import {
 	type TodoPhase,
 	TodoTool,
 	todoMatchesAnyDescription,
+	todoPhasesDigest,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -57,6 +59,126 @@ describe("resolveTodoMarkdownPath", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
 		expect(() => resolveTodoMarkdownPath("artifact://todo", cwd)).toThrow("internal scheme");
+	});
+});
+describe("applyTodoOperation", () => {
+	function runtimeSession(initial: TodoPhase[]) {
+		let phases = structuredClone(initial);
+		const persisted: TodoPhase[][] = [];
+		return {
+			session: {
+				getTodoPhases: () => phases,
+				setTodoPhases: (next: TodoPhase[]) => {
+					phases = next;
+				},
+				sessionManager: {
+					getSessionId: () => "session-a",
+					appendCustomEntry: <T = unknown>(_type: string, data?: T) => {
+						persisted.push((data as { phases: TodoPhase[] }).phases);
+					},
+				},
+			},
+			persisted,
+			phases: () => phases,
+		};
+	}
+
+	it("completes and persists one same-session task with CAS", () => {
+		const initial: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "finish", status: "in_progress" },
+					{ content: "next", status: "pending" },
+				],
+			},
+		];
+		const state = runtimeSession(initial);
+		const result = applyTodoOperation(state.session, {
+			sessionId: "session-a",
+			expectedDigest: todoPhasesDigest(initial),
+			op: "done",
+			task: "finish",
+		});
+		expect(result.outcome).toBe("applied");
+		expect(result.completedTasks).toEqual([{ phase: "Work", content: "finish" }]);
+		expect(state.phases()[0]?.tasks.map(task => task.status)).toEqual(["completed", "in_progress"]);
+		expect(state.persisted).toHaveLength(1);
+	});
+
+	it("uses an unambiguous structured digest rather than Markdown bytes", () => {
+		const injectedHeading: TodoPhase[] = [{ name: "A\n- [ ] X", tasks: [{ content: "Y", status: "pending" }] }];
+		const ordinary: TodoPhase[] = [
+			{
+				name: "A",
+				tasks: [
+					{ content: "X", status: "pending" },
+					{ content: "Y", status: "pending" },
+				],
+			},
+		];
+		expect(phasesToMarkdown(injectedHeading)).toBe(phasesToMarkdown(ordinary));
+		expect(todoPhasesDigest(injectedHeading)).not.toBe(todoPhasesDigest(ordinary));
+	});
+
+	it("rejects duplicate task content instead of completing the wrong row", () => {
+		const initial: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "same", status: "completed" },
+					{ content: "same", status: "in_progress" },
+				],
+			},
+		];
+		const state = runtimeSession(initial);
+		const result = applyTodoOperation(state.session, {
+			sessionId: "session-a",
+			expectedDigest: todoPhasesDigest(initial),
+			op: "done",
+			task: "same",
+		});
+		expect(result.outcome).toBe("invalid");
+		expect(state.phases()).toEqual(initial);
+		expect(state.persisted).toHaveLength(0);
+	});
+
+	it("rejects a unique task that is not currently in progress", () => {
+		const initial: TodoPhase[] = [{ name: "Work", tasks: [{ content: "later", status: "pending" }] }];
+		const state = runtimeSession(initial);
+		const result = applyTodoOperation(state.session, {
+			sessionId: "session-a",
+			expectedDigest: todoPhasesDigest(initial),
+			op: "done",
+			task: "later",
+		});
+		expect(result.outcome).toBe("invalid");
+		expect(state.phases()).toEqual(initial);
+		expect(state.persisted).toHaveLength(0);
+	});
+
+	it("rejects stale and cross-session completion without mutation", () => {
+		const initial: TodoPhase[] = [{ name: "Work", tasks: [{ content: "finish", status: "in_progress" }] }];
+		for (const input of [
+			{ sessionId: "session-a", expectedDigest: "0".repeat(64), op: "done" as const, task: "finish" },
+			{ sessionId: "session-b", expectedDigest: todoPhasesDigest(initial), op: "done" as const, task: "finish" },
+		]) {
+			const state = runtimeSession(initial);
+			const result = applyTodoOperation(state.session, input);
+			expect(["stale", "cross_session"]).toContain(result.outcome);
+			expect(state.phases()).toEqual(initial);
+			expect(state.persisted).toHaveLength(0);
+		}
+	});
+
+	it("views native state without persisting it", () => {
+		const initial: TodoPhase[] = [{ name: "Work", tasks: [{ content: "finish", status: "in_progress" }] }];
+		const state = runtimeSession(initial);
+		const result = applyTodoOperation(state.session, { sessionId: "session-a", op: "view" });
+		expect(result.outcome).toBe("applied");
+		expect(result.currentDigest).toBe(todoPhasesDigest(initial));
+		expect(result.phases).toEqual(initial);
+		expect(state.persisted).toHaveLength(0);
 	});
 });
 

@@ -15,6 +15,7 @@ import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/exte
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
+	resolveDeferredTaskRoute,
 	SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
@@ -2614,6 +2615,232 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("tool_call input", () => {
+		it("resolves a task route after downstream non-blocking guards and preserves their reason", async () => {
+			const routerPath = path.join(extensionsDir, "01-task-router.ts");
+			const guardPath = path.join(extensionsDir, "02-task-guard.ts");
+			fs.writeFileSync(
+				routerPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", event => {
+							if (event.toolName !== "task") return undefined;
+							return {
+								input: { ...event.input, agent: "task" },
+								taskRoute: {
+									agents: ["scout"],
+									resolve: async () => {
+										if (globalThis.__taskRouteGuardPassed !== true) {
+											throw new Error("route resolved before downstream guard");
+										}
+										globalThis.__taskRouteResolveCalls = (globalThis.__taskRouteResolveCalls ?? 0) + 1;
+										return { ...event.input, agent: "scout" };
+									},
+								},
+							};
+						});
+					}
+				`,
+			);
+			fs.writeFileSync(
+				guardPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", event => {
+							if (event.toolName !== "task") return undefined;
+							globalThis.__taskRouteGuardPassed = true;
+							return { reason: "downstream guard approved" };
+						});
+					}
+				`,
+			);
+			const globalState = globalThis as typeof globalThis & {
+				__taskRouteGuardPassed?: boolean;
+				__taskRouteResolveCalls?: number;
+			};
+			globalState.__taskRouteGuardPassed = false;
+			globalState.__taskRouteResolveCalls = 0;
+			try {
+				const loaded = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					loaded.extensions,
+					loaded.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const input = { agent: "task", name: "Route", task: "Inspect the target." };
+
+				expect(
+					await runner.emitToolCall({
+						type: "tool_call",
+						toolName: "task",
+						toolCallId: "route-after-guard",
+						input,
+					}),
+				).toEqual({
+					reason: "downstream guard approved",
+					input: { ...input, agent: "scout" },
+				});
+				expect(globalState.__taskRouteResolveCalls).toBe(1);
+			} finally {
+				delete globalState.__taskRouteGuardPassed;
+				delete globalState.__taskRouteResolveCalls;
+			}
+		});
+
+		it("keeps later guarded input instead of resolving a superseded task route", async () => {
+			const routerPath = path.join(extensionsDir, "01-task-router.ts");
+			const guardPath = path.join(extensionsDir, "02-task-normalizer.ts");
+			fs.writeFileSync(
+				routerPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", event => {
+							if (event.toolName !== "task") return undefined;
+							return {
+								input: event.input,
+								taskRoute: {
+									agents: ["scout"],
+									resolve: async () => {
+										globalThis.__supersededTaskRouteCalls = (globalThis.__supersededTaskRouteCalls ?? 0) + 1;
+										return { ...event.input, agent: "scout" };
+									},
+								},
+							};
+						});
+					}
+				`,
+			);
+			fs.writeFileSync(
+				guardPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", event => {
+							if (event.toolName !== "task") return undefined;
+							return { input: { ...event.input, task: "Normalized after routing guard." } };
+						});
+					}
+				`,
+			);
+			const globalState = globalThis as typeof globalThis & { __supersededTaskRouteCalls?: number };
+			globalState.__supersededTaskRouteCalls = 0;
+			try {
+				const loaded = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					loaded.extensions,
+					loaded.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const input = { agent: "task", name: "Route", task: "Inspect the target." };
+
+				expect(
+					await runner.emitToolCall({
+						type: "tool_call",
+						toolName: "task",
+						toolCallId: "route-superseded",
+						input,
+					}),
+				).toEqual({ input: { ...input, task: "Normalized after routing guard." } });
+				expect(globalState.__supersededTaskRouteCalls).toBe(0);
+			} finally {
+				delete globalState.__supersededTaskRouteCalls;
+			}
+		});
+
+		it("rejects unapproved or modified deferred task routes and safely falls back on failure", async () => {
+			const input = { agent: "task", name: "Route", task: "Inspect the target." };
+			await expect(
+				resolveDeferredTaskRoute({
+					input,
+					taskRoute: { agents: ["scout"], resolve: async () => ({ ...input, agent: "reviewer" }) },
+				}),
+			).resolves.toEqual({ block: true, reason: "Deferred task routing returned an unreserved agent" });
+			await expect(
+				resolveDeferredTaskRoute({
+					input,
+					taskRoute: {
+						agents: ["scout"],
+						resolve: async () => ({ ...input, agent: "scout", task: "Changed task." }),
+					},
+				}),
+			).resolves.toEqual({ block: true, reason: "Deferred task routing changed task arguments" });
+			await expect(
+				resolveDeferredTaskRoute({
+					input,
+					taskRoute: {
+						agents: ["task"],
+						resolve: async () => {
+							throw new Error("classifier unavailable");
+						},
+					},
+				}),
+			).resolves.toEqual({ input });
+		});
+
+		it("uses guarded input on timeout and blocks cancellation or non-task task routes", async () => {
+			const input = { agent: "task", name: "Route", task: "Inspect the target." };
+			vi.useFakeTimers();
+			try {
+				const pending = Promise.withResolvers<Record<string, unknown>>();
+				const timedOut = resolveDeferredTaskRoute(
+					{ input, taskRoute: { agents: ["task"], resolve: async () => pending.promise } },
+					undefined,
+					10,
+				);
+				vi.advanceTimersByTime(10);
+				await expect(timedOut).resolves.toEqual({ input });
+			} finally {
+				vi.useRealTimers();
+			}
+
+			const parent = new AbortController();
+			const pending = Promise.withResolvers<Record<string, unknown>>();
+			const cancelled = resolveDeferredTaskRoute(
+				{ input, taskRoute: { agents: ["task"], resolve: async () => pending.promise } },
+				parent.signal,
+			);
+			parent.abort(new Error("cancelled"));
+			await expect(cancelled).resolves.toEqual({ block: true, reason: "Deferred task routing cancelled" });
+
+			const routePath = path.join(extensionsDir, "non-task-route.ts");
+			fs.writeFileSync(
+				routePath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", () => ({
+							taskRoute: {
+									agents: ["task"],
+									resolve: async () => {
+										globalThis.__nonTaskRouteCalls = (globalThis.__nonTaskRouteCalls ?? 0) + 1;
+										return {};
+									},
+								},
+						}));
+					}
+				`,
+			);
+			const globalState = globalThis as typeof globalThis & { __nonTaskRouteCalls?: number };
+			globalState.__nonTaskRouteCalls = 0;
+			try {
+				const loaded = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					loaded.extensions,
+					loaded.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				await expect(
+					runner.emitToolCall({ type: "tool_call", toolName: "bash", toolCallId: "non-task-route", input: {} }),
+				).resolves.toEqual({ block: true, reason: "Deferred task routing is only valid for task tool calls" });
+				expect(globalState.__nonTaskRouteCalls).toBe(0);
+			} finally {
+				delete globalState.__nonTaskRouteCalls;
+			}
+		});
+
 		function createHashlineEditTool(): AgentTool {
 			return {
 				name: "edit",

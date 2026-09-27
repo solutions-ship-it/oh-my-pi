@@ -1,12 +1,17 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { Container, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "../../../src/config/keybindings";
-import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
+import type {
+	ExtensionActions,
+	ExtensionAskDialogQuestion,
+	ExtensionUIContext,
+} from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";
 import { CustomEditor } from "../../../src/modes/components/custom-editor";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
+import { type TodoPhase, todoPhasesDigest } from "../../../src/tools/todo";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -31,7 +36,17 @@ function makeHarness() {
 		isHidden: vi.fn(() => false),
 	};
 	const showOverlay = vi.fn(() => fakeHandle);
+	const reloadTodos = vi.fn(async () => undefined);
+	const showStatus = vi.fn();
 	let uiContext: ExtensionUIContext | undefined;
+	let extensionActions: ExtensionActions | undefined;
+	let todoPhases: TodoPhase[] = [
+		{
+			name: "Work",
+			tasks: [{ content: "finish", status: "in_progress" }],
+		},
+	];
+	const appendCustomEntry = vi.fn();
 	const ctx = {
 		editor,
 		ui: {
@@ -42,9 +57,27 @@ function makeHarness() {
 		},
 		editorContainer,
 		session: {
-			extensionRunner: undefined,
+			getSessionId: () => "session-a",
+			extensionRunner: {
+				getComposerShapes: () => [],
+				initialize: (actions: ExtensionActions) => {
+					extensionActions = actions;
+				},
+				onError: vi.fn(),
+				emit: vi.fn(async () => undefined),
+			},
 			setUsageFallbackConfirmer: vi.fn(),
+			getTodoPhases: () => todoPhases,
+			setTodoPhases: (phases: TodoPhase[]) => {
+				todoPhases = phases;
+			},
+			sessionManager: {
+				getSessionId: () => "session-a",
+				appendCustomEntry,
+			},
 		},
+		reloadTodos,
+		showStatus,
 		setToolUIContext(context: ExtensionUIContext, hasUI: boolean): void {
 			expect(hasUI).toBe(true);
 			uiContext = context;
@@ -64,6 +97,14 @@ function makeHarness() {
 		showOverlay,
 		fakeHandle,
 		controller,
+		reloadTodos,
+		showStatus,
+		appendCustomEntry,
+		todoPhases: () => todoPhases,
+		actions(): ExtensionActions {
+			if (extensionActions === undefined) throw new Error("Expected extension actions");
+			return extensionActions;
+		},
 		async init(): Promise<ExtensionUIContext> {
 			await controller.initHooksAndCustomTools();
 			expect(uiContext).toBeDefined();
@@ -349,5 +390,45 @@ describe("ExtensionUiController custom overlay", () => {
 		expect(component.dispose).toHaveBeenCalledTimes(1);
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.editor.getText()).toBe("draft typed while factory is pending");
+	});
+});
+describe("ExtensionUiController native todo wiring", () => {
+	it("refreshes the TUI after an extension applies a native todo completion", async () => {
+		const harness = makeHarness();
+		await harness.init();
+
+		const operation = harness.actions().applyTodoOperation;
+		expect(operation).toBeDefined();
+		const result = operation!({
+			sessionId: "session-a",
+			expectedDigest: todoPhasesDigest(harness.todoPhases()),
+			op: "done",
+			task: "finish",
+		});
+
+		expect(result.outcome).toBe("applied");
+		await Promise.resolve();
+		expect(harness.reloadTodos).toHaveBeenCalledTimes(1);
+		expect(harness.todoPhases()[0]?.tasks[0]?.status).toBe("completed");
+		expect(harness.appendCustomEntry).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not refresh the TUI when a stale completion is rejected", async () => {
+		const harness = makeHarness();
+		await harness.init();
+
+		const operation = harness.actions().applyTodoOperation;
+		expect(operation).toBeDefined();
+		const result = operation!({
+			sessionId: "session-a",
+			expectedDigest: "0".repeat(64),
+			op: "done",
+			task: "finish",
+		});
+
+		expect(result.outcome).toBe("stale");
+		await Promise.resolve();
+		expect(harness.reloadTodos).not.toHaveBeenCalled();
+		expect(harness.appendCustomEntry).not.toHaveBeenCalled();
 	});
 });

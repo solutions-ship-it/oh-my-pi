@@ -308,6 +308,9 @@ Cancelable pre-events:
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
+For flat `task` tool calls, a `tool_call` handler may return its guarded `input` together with `taskRoute`: `{ agents: string[]; resolve(signal): Promise<Record<string, unknown>> }`. The runner invokes `resolve` after every non-blocking handler and before approval. It accepts only a listed agent and rejects a resolver that changes any other task argument; an error or timeout retains the guarded input, while cancellation blocks execution. A later handler that supplies `input` supersedes an earlier reservation.
+
+
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
 
 ### Reliability/runtime signals
@@ -603,6 +606,8 @@ For durable extension state:
 1. Persist with `pi.appendEntry("com.example.my-extension.state", data)`. The `customType` namespace is global: use a package- or reverse-domain-qualified value and avoid the core-reserved values in the [`custom` session-entry reference](./session.md#custom).
 2. Rebuild state from `ctx.sessionManager.getBranch()` on `session_start`, `session_branch`, `session_tree`.
 3. Keep tool result `details` structured when state should be visible/reconstructible from tool result history.
+
+For native todo state, call `pi.applyTodoOperation` from an event handler with `sessionId: ctx.sessionManager.getSessionId()`. Begin with `{ op: "view" }` and retain its `currentDigest`; a `done` call must supply that digest plus the exact, globally unique `in_progress` task content. Handle `stale`, `cross_session`, and `invalid` outcomes without retrying a mutation blindly; an applied completion persists through the native todo history.
 
 Example reconstruction pattern:
 
